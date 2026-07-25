@@ -181,15 +181,13 @@ defmodule Chronicle.RotationAndEdgesTest do
         def fetch(_ledger, _key_id, _opts), do: raise("vault down")
       end
 
-      assert {:error, {:keyring_failure, %RuntimeError{}}} =
+      assert {:error, {:keyring_failure, RuntimeError}} =
                Chronicle.Keyring.current("primary", 1, keyring: RaisingKeyring)
     end
 
     test "an unusable keyring configuration is reported rather than crashing the write" do
-      assert {:error, {:keyring_failure, %ArgumentError{message: message}}} =
+      assert {:error, {:keyring_failure, ArgumentError}} =
                Chronicle.Keyring.current("primary", 1, keyring: "nope")
-
-      assert message =~ "invalid audit keyring"
     end
 
     test "a key returned under the wrong id is rejected" do

@@ -25,7 +25,7 @@ if Code.ensure_loaded?(Ecto.Changeset) do
     # would write it back into the live record as though it were data. Refusing
     # is the only answer that cannot silently corrupt the thing it is restoring.
 
-    alias Chronicle.{Canonical, Digest, Redaction, Sensitive, Value}
+    alias Chronicle.{Canonical, Digest, Erasable, Erasure, Redaction, Sensitive, Value}
 
     @format 1
 
@@ -45,7 +45,7 @@ if Code.ensure_loaded?(Ecto.Changeset) do
     @spec capture(:insert | :update | :delete, struct(), keyword()) :: map()
     def capture(operation, %schema{} = record, opts)
         when operation in [:insert, :update, :delete] do
-      redactor = Redaction.ecto_redactor(schema, opts)
+      redactor = Redaction.ecto_redactor(schema, Keyword.put(opts, :record, record))
       value_policy = Redaction.compile(Keyword.put(opts, :schema, schema))
 
       # Every persisted field is captured; only protection can withhold one.
@@ -188,6 +188,9 @@ if Code.ensure_loaded?(Ecto.Changeset) do
         %Sensitive{} ->
           :protected
 
+        %Erasable{} = erasable ->
+          {:ok, Value.normalize(erasable, policy)}
+
         protected ->
           normalized = Value.normalize(protected, policy)
           if normalized == original, do: {:ok, normalized}, else: :protected
@@ -244,6 +247,7 @@ if Code.ensure_loaded?(Ecto.Changeset) do
             {:cont, {:ok, Map.put(attributes, field, loaded)}}
           else
             :error -> {:halt, {:error, {:snapshot_field_invalid, field, stored_value}}}
+            {:error, {:erasure_key_unavailable, _key_id} = reason} -> {:halt, {:error, reason}}
             {:error, reason} -> {:halt, {:error, {:snapshot_field_invalid, field, reason}}}
           end
         else
@@ -296,12 +300,18 @@ if Code.ensure_loaded?(Ecto.Changeset) do
     end
 
     defp decode_value(value) when is_map(value) do
-      Enum.reduce_while(value, {:ok, %{}}, fn {key, nested}, {:ok, decoded} ->
-        case decode_value(nested) do
-          {:ok, decoded_nested} -> {:cont, {:ok, Map.put(decoded, key, decoded_nested)}}
-          {:error, _reason} = error -> {:halt, error}
+      if Erasure.envelope?(value) do
+        with {:ok, decrypted} <- Erasure.decrypt(value) do
+          decode_value(decrypted)
         end
-      end)
+      else
+        Enum.reduce_while(value, {:ok, %{}}, fn {key, nested}, {:ok, decoded} ->
+          case decode_value(nested) do
+            {:ok, decoded_nested} -> {:cont, {:ok, Map.put(decoded, key, decoded_nested)}}
+            {:error, _reason} = error -> {:halt, error}
+          end
+        end)
+      end
     end
 
     defp decode_value(value) when is_list(value) do

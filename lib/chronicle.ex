@@ -237,6 +237,9 @@ defmodule Chronicle do
     type
     |> Event.new(data, opts)
     |> persist(opts)
+  rescue
+    error in Chronicle.Erasure.Error ->
+      {:error, Error.new(:write, error.reason, store: Config.store_name(opts))}
   end
 
   @doc "Raising variant of `record/3`."
@@ -362,6 +365,22 @@ defmodule Chronicle do
   @doc "Marks a map field or list item to be dropped entirely."
   @spec omit() :: Chronicle.Sensitive.t()
   def omit, do: %Chronicle.Sensitive{strategy: :omit}
+
+  @doc """
+  Marks a value for authenticated encryption under a destroyable key.
+
+  `key_id` is an opaque identifier resolved by `Chronicle.ErasureKeyring`; it
+  is stored in the signed ciphertext envelope and must contain no personal
+  data. Destroying that key through `Chronicle.Erasure.destroy/1` makes the
+  value unrecoverable without breaking ledger verification.
+  """
+  @spec erasable(term(), String.t()) :: Chronicle.Erasable.t()
+  def erasable(value, key_id) when is_binary(key_id) and byte_size(key_id) > 0,
+    do: %Chronicle.Erasable{value: value, key_id: key_id}
+
+  def erasable(_value, key_id) do
+    raise ArgumentError, "erasure key id must be a non-empty string, got: #{inspect(key_id)}"
+  end
 
   # ----------------------------------------------------------------------
   # Verification and operations

@@ -37,6 +37,13 @@ authenticated hash chain. Chronicle detects:
 - use of the wrong signing key for a configured key epoch; and
 - deletion or rollback past a checkpoint held outside the audit database.
 
+Entries carry their integrity algorithm and canonical version. Verification
+selects a frozen implementation from a closed registry, so introducing a new
+writer does not remove the code needed to verify retained history. Until 1.0
+the existing formats remain experimental as stated above; from 1.0 onward,
+every released scheme must remain registered for the applicable evidence
+retention horizon.
+
 Chronicle is tamper-evident and rollback-resistant, not magically tamper-proof.
 An attacker controlling the application and an active signing key can create
 valid new history until a checkpoint is published. An attacker controlling the
@@ -216,7 +223,8 @@ defmodule MyApp.Account do
     except: [:ephemeral_value],
     redact: [:password_hash],
     hash: [:email],
-    omit: [:session_token]
+    omit: [:session_token],
+    erasable: [display_name: :privacy_key_id]
 
   # ...
 end
@@ -229,6 +237,8 @@ The two groups of options answer different questions:
   This is how you keep a noisy `touched_at` or counter column out of the audit
   trail without generating an event that says nothing.
 - `redact`, `hash`, and `omit` withhold a value from the audit store.
+- `erasable` maps an encrypted field to the persisted field containing its
+  opaque external data-encryption-key identifier.
 
 `hash` stores an unsalted SHA-256 fingerprint. It answers correlation
 questions — did this field change, did it revert to an earlier value, does it
@@ -286,6 +296,81 @@ Protection and reconstruction pull in opposite directions: a protected field
 cannot be restored. `mix chronicle.doctor` reports every audited schema whose
 versions are consequently not restorable, so that is a visible decision rather
 than a surprise at the first `Chronicle.at/2` call.
+
+### Erasable values
+
+Data that is eligible for later erasure must not enter the ledger in clear
+text. Chronicle can instead commit to authenticated ciphertext under an
+externally destroyable 256-bit key. The ciphertext remains signed evidence;
+destroying its key removes plaintext access without creating a gap in the
+ledger.
+
+Configure one keyring whose storage has a separate lifecycle from the audit
+database:
+
+```elixir
+defmodule MyApp.PrivacyKeys do
+  @behaviour Chronicle.ErasureKeyring
+
+  @impl true
+  def fetch(key_id, opts), do: MyApp.Vault.fetch_data_key(opts[:vault], key_id)
+
+  @impl true
+  def destroy(key_id, opts), do: MyApp.Vault.destroy_data_key(opts[:vault], key_id)
+end
+
+config :chronicle,
+  erasure: [
+    keyring: {MyApp.PrivacyKeys, vault: MyApp.Vault}
+  ]
+```
+
+For an Ecto record, map each erasable field to the persisted field containing
+the opaque key identifier:
+
+```elixir
+defmodule MyApp.Account do
+  use Ecto.Schema
+  use Chronicle.Schema, erasable: [email: :privacy_key_id]
+
+  schema "accounts" do
+    field :email, :string
+    field :privacy_key_id, :string
+  end
+end
+```
+
+The key identifier is signed and remains after erasure, so it must be stable,
+opaque, and contain no personal data. The same identifier may protect several
+values belonging to one erasure subject; deciding that scope is application
+data-classification policy.
+
+Arbitrary facts use an explicit marker:
+
+```elixir
+Chronicle.record("account.email_changed", %{
+  account: Chronicle.ref(account),
+  email: Chronicle.erasable(account.email, account.privacy_key_id)
+})
+```
+
+While the key exists, `Chronicle.Erasure.decrypt/1` recovers an encrypted event
+value and Ecto history reconstructs normally. Erasure is explicit:
+
+```elixir
+:ok = Chronicle.Erasure.destroy(account.privacy_key_id)
+```
+
+After destruction, `Chronicle.verify_all/2` still verifies the ciphertext and
+the rest of the chain. `Chronicle.at/2` and `Chronicle.revert/2` return
+`:erasure_key_unavailable` for a snapshot that needs the destroyed value, and
+the corresponding version reports `restorable? == false`.
+
+`destroy/1` is only as strong as the keyring implementation. It must not return
+`:ok` while replicas, backups, provider recovery windows, or escrow can still
+recover the key. Chronicle cannot retrospectively protect plaintext already
+written, and key destruction is wrong for a value still required under a
+retention obligation or legal hold.
 
 ## Larger audited operations
 
@@ -365,7 +450,8 @@ Explicit sensitive markers work in arbitrary nested event data:
 %{
   credential: Chronicle.secret(value),
   fingerprint: Chronicle.hash(value),
-  payload: Chronicle.omit()
+  payload: Chronicle.omit(),
+  personal_value: Chronicle.erasable(value, privacy_key_id)
 }
 ```
 
@@ -404,6 +490,12 @@ ledger entry:
 ```elixir
 Chronicle.verify_all(:primary, verification_batch_size: 1_000)
 ```
+
+Verification dispatches each stored `{algorithm, canonical_version}` pair
+through Chronicle's closed registry. Only the current scheme writes; retained
+schemes verify historical entries and cannot be selected from configuration.
+An unknown selector fails closed instead of running arbitrary code or applying
+the current rules to old evidence.
 
 For rollback detection, implement `Chronicle.CheckpointStore` using a system
 outside the audit database and supervise the verifier:
@@ -462,6 +554,8 @@ key. Historical keys remain necessary for full verification.
 Chronicle uses OTP `:crypto` for SHA-256 and HMAC-SHA-256. Digestif is a
 password-hashing library and is deliberately not used for ledger primitives;
 password hashing and authenticated audit chaining solve different problems.
+Erasable values use OTP AES-256-GCM with a fresh 96-bit nonce and a 128-bit
+authentication tag.
 
 ## Named stores and advanced configuration
 
@@ -550,6 +644,8 @@ checkpoint.
 - Restrict or revoke `UPDATE` and `DELETE` on audit tables for the application
   database role when operationally possible.
 - Back up audit rows, ledger entries, key history, and external checkpoints.
+- Keep erasure keys outside the audit database, and test that destruction also
+  covers replicas, backups, escrow, and provider recovery windows.
 - Treat `occurred_at` as signed application time; ledger sequence is the
   authoritative commit order.
 - Run `mix chronicle.doctor` after deployment and key-configuration changes.

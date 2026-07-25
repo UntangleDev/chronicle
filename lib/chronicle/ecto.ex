@@ -94,7 +94,7 @@ if Code.ensure_loaded?(Ecto.Changeset) do
         when operation in [:insert, :update, :delete] do
       schema = result.__struct__
       policy = Chronicle.Ecto.Policy.get(schema)
-      redactor = Redaction.ecto_redactor(schema, opts)
+      redactor = Redaction.ecto_redactor(schema, Keyword.put(opts, :record, result))
       value_policy = Redaction.compile(Keyword.put(opts, :schema, schema))
 
       changed_fields(operation, changeset, result)

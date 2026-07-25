@@ -61,6 +61,36 @@ defmodule Chronicle.PolicyAndProviderTest do
       end
     end
 
+    test "validates erasable field-to-key-field mappings" do
+      assert_raise ArgumentError, ~r/erasable must map field atoms/, fn ->
+        defmodule BadErasableShape do
+          use Ecto.Schema
+          use Chronicle.Schema, erasable: [:a]
+          schema("bad_erasable", do: field(:a, :string))
+        end
+      end
+
+      assert_raise ArgumentError, ~r/more than one protection strategy/, fn ->
+        defmodule DoubleErasable do
+          use Ecto.Schema
+          use Chronicle.Schema, redact: [:a], erasable: [a: :key_id]
+
+          schema "double_erasable" do
+            field :a, :string
+            field :key_id, :string
+          end
+        end
+      end
+
+      assert_raise ArgumentError, ~r/unknown fields: \[:missing_key_id\]/, fn ->
+        defmodule MissingErasableKeyField do
+          use Ecto.Schema
+          use Chronicle.Schema, erasable: [a: :missing_key_id]
+          schema("missing_erasable_key", do: field(:a, :string))
+        end
+      end
+    end
+
     test "rejects a policy naming a field the schema does not have" do
       assert_raise ArgumentError, ~r/unknown fields: \[:absent\]/, fn ->
         defmodule UnknownField do

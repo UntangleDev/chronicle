@@ -44,7 +44,7 @@ defmodule Chronicle.Value do
   # match — is not protected by anything here. `Chronicle.Redaction` documents
   # the matching rules; this is the shape of what they cannot see.
 
-  alias Chronicle.Redaction
+  alias Chronicle.{Erasable, Erasure, Redaction}
   alias Chronicle.Redaction.Policy
   alias Chronicle.Value.Raw
 
@@ -83,6 +83,9 @@ defmodule Chronicle.Value do
   def canonical(value), do: do_normalize(value, nil)
 
   defp do_normalize(%Raw{value: value}, _policy), do: value
+
+  defp do_normalize(%Erasable{value: value, key_id: key_id}, _policy),
+    do: Erasure.encrypt!(value, key_id)
 
   defp do_normalize(%Chronicle.Sensitive{strategy: :redact}, _policy), do: "[REDACTED]"
   defp do_normalize(%Chronicle.Sensitive{strategy: :omit}, _policy), do: @omit

@@ -36,8 +36,10 @@ defmodule Chronicle.Keyring do
   in ways this module cannot anticipate, so results are treated as untrusted
   input: the return value must be a `Chronicle.Key`, `fetch/4` confirms the
   descriptor carries the id that was actually requested, and exceptions are
-  converted into `{:error, {:keyring_failure, _}}` rather than escaping into
-  the middle of a domain transaction.
+  converted into `{:error, {:keyring_failure, exception_module}}` rather than
+  escaping into the middle of a domain transaction. Exception messages and
+  fields are discarded because secret-manager clients may put key material in
+  them.
   """
 
   alias Chronicle.Key
@@ -58,7 +60,7 @@ defmodule Chronicle.Keyring do
       {:ok, key}
     end
   rescue
-    exception -> {:error, {:keyring_failure, exception}}
+    exception -> {:error, {:keyring_failure, exception.__struct__}}
   end
 
   @spec fetch(String.t(), String.t(), pos_integer() | nil, keyword()) :: result()
@@ -72,7 +74,7 @@ defmodule Chronicle.Keyring do
       {:ok, key}
     end
   rescue
-    exception -> {:error, {:keyring_failure, exception}}
+    exception -> {:error, {:keyring_failure, exception.__struct__}}
   end
 
   @doc """

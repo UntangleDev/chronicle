@@ -3,7 +3,7 @@ defmodule Chronicle.Integrity.Entry do
   Cryptographic commitment to one append-only audit ledger unit.
 
   The digests and the material they were computed from travel together, which
-  is what lets `Chronicle.Integrity.verify/5` recompute an entry from the
+  is what lets `Chronicle.Integrity.verify_entry/5` recompute an entry from the
   original payload and compare, rather than take the stored digests on trust.
 
   `previous_digest` is the one field outside `@enforce_keys`. The first entry
@@ -102,7 +102,7 @@ defmodule Chronicle.Integrity do
   Each digest is computed over the one before it, so a single act of tampering
   invalidates all three: editing a payload changes the content digest, which
   changes the chain digest containing it, which changes the signature over
-  that. `verify/5` therefore checks them innermost first, so the mismatch it
+  that. `verify_entry/5` therefore checks them innermost first, so the mismatch it
   reports is the root cause rather than the outermost symptom. Checking the
   signature first would be equally sound cryptographically and would answer
   `:signature_mismatch` for every possible attack, which tells an operator
@@ -125,16 +125,14 @@ defmodule Chronicle.Integrity do
   The algorithm string and the canonical encoding version are hashed into all
   three tuples as well as being stored on the entry. Because the digests cover
   them, an entry cannot be relabelled as using a weaker scheme and still
-  verify. That is what makes it safe to change either one later: entries
-  written under the old rules fail loudly with `:unsupported_algorithm` or
-  `:unsupported_canonical_version` instead of being checked under rules they
-  were never written for.
+  verify. Verification uses the stored pair to select a frozen implementation
+  from a closed registry. A known historical pair is always checked under the
+  rules that wrote it; an unknown pair fails loudly with
+  `:unsupported_algorithm` or `:unsupported_canonical_version`.
   """
 
-  alias Chronicle.{Canonical, Digest, Integrity.Entry, Keyring}
-  alias Chronicle.Value
-
-  @algorithm "audit-binary-v1-hmac-sha256-v2"
+  alias Chronicle.Integrity.{Entry, Registry}
+  alias Chronicle.Keyring
 
   # HMAC-SHA-256 is only as strong as the smaller of its key and its output.
   # Below 32 bytes the key becomes the weakest part of the construction; above
@@ -169,58 +167,18 @@ defmodule Chronicle.Integrity do
       when kind in [:event, :group] and is_binary(record_id) and is_integer(sequence) and
              sequence > 0 and is_list(opts) do
     with {:ok, ledger} <- non_empty_string(Keyword.get(opts, :ledger, "default"), :ledger),
-         {:ok, key} <- Keyring.current(ledger, sequence, opts) do
-      build_current(
+         {:ok, descriptor} <- Keyring.current(ledger, sequence, opts),
+         {:ok, key} <- resolve_key(descriptor.source) do
+      Registry.current().build(
         kind,
         record_id,
         payload,
         sequence,
         previous_digest,
-        Keyword.merge(opts, ledger: ledger, key_id: key.id, key: key.source)
+        ledger,
+        descriptor.id,
+        key
       )
-    end
-  end
-
-  defp build_current(kind, record_id, payload, sequence, previous_digest, opts) do
-    with {:ok, ledger} <- non_empty_string(Keyword.get(opts, :ledger, "default"), :ledger),
-         {:ok, key_id} <- non_empty_string(Keyword.get(opts, :key_id), :key_id),
-         {:ok, key} <- resolve_key(Keyword.get(opts, :key)) do
-      canonical_version = Canonical.version()
-
-      # Each digest is an input to the next: content, then position, then
-      # authentication. Reordering these three blocks does not compile to a
-      # weaker chain, it compiles to no chain at all.
-      content_digest =
-        {:audit_content_v2, @algorithm, canonical_version, kind, record_id,
-         Value.canonical(payload)}
-        |> canonical()
-        |> sha256()
-
-      digest =
-        {:audit_chain_v2, @algorithm, canonical_version, ledger, sequence, previous_digest, kind,
-         record_id, content_digest}
-        |> canonical()
-        |> sha256()
-
-      signature =
-        {:audit_signature_v2, @algorithm, canonical_version, ledger, sequence, digest, key_id}
-        |> canonical()
-        |> hmac(key)
-
-      {:ok,
-       %Entry{
-         ledger: ledger,
-         sequence: sequence,
-         kind: kind,
-         record_id: record_id,
-         previous_digest: previous_digest,
-         content_digest: content_digest,
-         digest: digest,
-         signature: signature,
-         key_id: key_id,
-         algorithm: @algorithm,
-         canonical_version: canonical_version
-       }}
     end
   end
 
@@ -238,59 +196,40 @@ defmodule Chronicle.Integrity do
   `:chain_digest_mismatch` for content that is intact but relocated,
   `:signature_mismatch` for a chain rebuilt without the key. See the module
   documentation for why that ordering is load-bearing rather than tidy.
-  """
-  @spec verify(Entry.t(), term(), String.t() | nil, pos_integer(), binary()) ::
-          :ok | {:error, term()}
-  def verify(%Entry{} = entry, payload, expected_previous, expected_sequence, key_source)
-      when is_binary(key_source) do
-    opts = [ledger: entry.ledger, key_id: entry.key_id, key: key_source]
 
-    with {:ok, key} <- resolve_key(key_source),
-         :ok <- check(entry.sequence == expected_sequence, {:unexpected_sequence, entry.sequence}),
+  The key is always selected from the configured keyring using the entry's
+  signed `key_id` and sequence. Raw key material is not an accepted argument.
+  This makes epoch enforcement a property of the operation rather than a
+  convention each caller has to remember.
+  """
+  @spec verify_entry(
+          Entry.t(),
+          term(),
+          String.t() | nil,
+          pos_integer(),
+          integrity_options()
+        ) ::
+          :ok | {:error, term()}
+  def verify_entry(%Entry{} = entry, payload, expected_previous, expected_sequence, opts)
+      when is_list(opts) do
+    with :ok <- check(entry.sequence == expected_sequence, {:unexpected_sequence, entry.sequence}),
          :ok <-
            check(
              secure_equal?(entry.previous_digest, expected_previous),
              {:previous_digest_mismatch, entry.sequence}
            ),
-         {:ok, expected} <- rebuild(entry, payload, Keyword.put(opts, :key, key)),
-         :ok <-
-           check(
-             secure_equal?(entry.content_digest, expected.content_digest),
-             {:content_digest_mismatch, entry.sequence}
+         {:ok, scheme} <- Registry.fetch(entry.algorithm, entry.canonical_version),
+         {:ok, key} <-
+           verification_key(
+             entry.key_id,
+             entry.sequence,
+             Keyword.put(opts, :ledger, entry.ledger)
            ),
-         :ok <-
-           check(
-             secure_equal?(entry.digest, expected.digest),
-             {:chain_digest_mismatch, entry.sequence}
-           ),
-         :ok <-
-           check(
-             secure_equal?(entry.signature, expected.signature),
-             {:signature_mismatch, entry.sequence}
-           ) do
+         {:ok, expected} <- scheme.rebuild(entry, payload, key),
+         :ok <- scheme.compare(entry, expected) do
       :ok
     end
   end
-
-  defp rebuild(%Entry{algorithm: @algorithm, canonical_version: version} = entry, payload, opts) do
-    with :ok <-
-           check(
-             version == Canonical.version(),
-             {:unsupported_canonical_version, version}
-           ) do
-      build_current(
-        entry.kind,
-        entry.record_id,
-        payload,
-        entry.sequence,
-        entry.previous_digest,
-        opts
-      )
-    end
-  end
-
-  defp rebuild(%Entry{algorithm: algorithm}, _payload, _opts),
-    do: {:error, {:unsupported_algorithm, algorithm}}
 
   @doc """
   Resolves a verification key and enforces its configured sequence epoch.
@@ -342,7 +281,7 @@ defmodule Chronicle.Integrity do
     # boundary and the exception raised behind it is arbitrary. A key that
     # cannot be resolved has to fail the surrounding write with a matchable
     # reason, not escape as an exception from inside a domain transaction.
-    exception -> {:error, {:integrity_key_resolution_failed, exception}}
+    exception -> {:error, {:integrity_key_resolution_failed, exception.__struct__}}
   end
 
   @doc """
@@ -368,7 +307,7 @@ defmodule Chronicle.Integrity do
   Rows reach this function both from Ecto schemas and from raw queries, hence
   the tolerance for either key type. Nothing is validated beyond `kind`: a row
   written under an older algorithm or canonical version reconstructs quite
-  happily here and is rejected by `verify/5`, which is the layer that knows
+  happily here and is rejected by `verify_entry/5`, which is the layer that knows
   what "supported" means. Keeping the judgement in one place is why this
   function looks credulous.
   """
@@ -389,10 +328,6 @@ defmodule Chronicle.Integrity do
         Map.get(row, :canonical_version, Map.get(row, "canonical_version", 0)) || 0
     }
   end
-
-  defp canonical(term), do: Canonical.encode(term)
-  defp sha256(value), do: Digest.sha256(value)
-  defp hmac(value, key), do: Digest.hmac_sha256(key, value)
 
   # A `nil` previous_digest means genesis, not a missing value, so two of them
   # agreeing is a match rather than an absence of evidence.

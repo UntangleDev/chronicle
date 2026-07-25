@@ -96,6 +96,46 @@ defmodule Chronicle.CanonicalLimitsTest do
       ok = Enum.reduce(1..60, "leaf", fn _, acc -> [acc] end)
       assert is_binary(Canonical.encode(ok))
     end
+
+    test "lists stop at the aggregate budget before visiting a later unsupported term" do
+      chunk = String.duplicate("x", 1_024 * 1_024)
+      over_budget = List.duplicate(chunk, 33) ++ [self()]
+
+      error =
+        assert_raise ArgumentError, ~r/encoded term size/, fn ->
+          Canonical.encode(over_budget)
+        end
+
+      refute Exception.message(error) =~ "pid"
+    end
+
+    test "tuples stop at the aggregate budget before visiting a later unsupported term" do
+      chunk = String.duplicate("x", 1_024 * 1_024)
+      over_budget = List.to_tuple(List.duplicate(chunk, 33) ++ [self()])
+
+      error =
+        assert_raise ArgumentError, ~r/encoded term size/, fn ->
+          Canonical.encode(over_budget)
+        end
+
+      refute Exception.message(error) =~ "pid"
+    end
+
+    test "maps encode values in canonical key order and stop before a later unsupported value" do
+      chunk = String.duplicate("x", 1_024 * 1_024)
+
+      over_budget =
+        1..33
+        |> Map.new(fn index -> {String.pad_leading(Integer.to_string(index), 2, "0"), chunk} end)
+        |> Map.put("zz", self())
+
+      error =
+        assert_raise ArgumentError, ~r/encoded term size/, fn ->
+          Canonical.encode(over_budget)
+        end
+
+      refute Exception.message(error) =~ "pid"
+    end
   end
 
   describe "integrity uses it end to end" do
@@ -105,7 +145,7 @@ defmodule Chronicle.CanonicalLimitsTest do
       payload = %{"a" => 1, "nested" => [1, 2, 3]}
 
       assert {:ok, entry} = Chronicle.Integrity.build(:event, "id-1", payload, 1, nil, opts)
-      assert :ok = Chronicle.Integrity.verify(entry, payload, nil, 1, key)
+      assert :ok = Chronicle.Integrity.verify_entry(entry, payload, nil, 1, opts)
     end
 
     test "a payload whose keys were reordered still verifies" do
@@ -115,7 +155,8 @@ defmodule Chronicle.CanonicalLimitsTest do
       assert {:ok, entry} =
                Chronicle.Integrity.build(:event, "id-1", %{"a" => 1, "b" => 2}, 1, nil, opts)
 
-      assert :ok = Chronicle.Integrity.verify(entry, %{"b" => 2, "a" => 1}, nil, 1, key)
+      assert :ok =
+               Chronicle.Integrity.verify_entry(entry, %{"b" => 2, "a" => 1}, nil, 1, opts)
     end
 
     test "a different key does not verify" do
@@ -126,7 +167,15 @@ defmodule Chronicle.CanonicalLimitsTest do
       assert {:ok, entry} = Chronicle.Integrity.build(:event, "id-1", %{}, 1, nil, opts)
 
       assert {:error, {:signature_mismatch, 1}} =
-               Chronicle.Integrity.verify(entry, %{}, nil, 1, other)
+               Chronicle.Integrity.verify_entry(
+                 entry,
+                 %{},
+                 nil,
+                 1,
+                 ledger: "primary",
+                 key_id: "k",
+                 key: other
+               )
     end
 
     test "an entry built for one position does not verify at another" do
@@ -136,10 +185,10 @@ defmodule Chronicle.CanonicalLimitsTest do
       assert {:ok, entry} = Chronicle.Integrity.build(:event, "id-1", %{}, 2, "abc", opts)
 
       assert {:error, {:unexpected_sequence, 2}} =
-               Chronicle.Integrity.verify(entry, %{}, "abc", 3, key)
+               Chronicle.Integrity.verify_entry(entry, %{}, "abc", 3, opts)
 
       assert {:error, {:previous_digest_mismatch, 2}} =
-               Chronicle.Integrity.verify(entry, %{}, "other", 2, key)
+               Chronicle.Integrity.verify_entry(entry, %{}, "other", 2, opts)
     end
   end
 
@@ -182,7 +231,7 @@ defmodule Chronicle.CanonicalLimitsTest do
     end
 
     test "a resolver that raises is reported rather than crashing the write" do
-      assert {:error, {:integrity_key_resolution_failed, %RuntimeError{}}} =
+      assert {:error, {:integrity_key_resolution_failed, RuntimeError}} =
                Chronicle.Integrity.resolve_key(fn -> raise "vault down" end)
     end
 

@@ -261,15 +261,13 @@ if Code.ensure_loaded?(Ecto.Query) do
         {:ok, previous, anchored?, verified_count},
         fn entry, {:ok, previous, anchored?, count} ->
           with {:ok, payload} <- payload(payloads, entry),
-               {:ok, key} <-
-                 CoreIntegrity.verification_key(entry.key_id, entry.sequence, integrity_opts),
                :ok <-
-                 CoreIntegrity.verify(
+                 CoreIntegrity.verify_entry(
                    entry,
                    payload,
                    previous.digest,
                    previous.sequence + 1,
-                   key
+                   integrity_opts
                  ),
                :ok <- verify_semantics(entry, payload, integrity_opts) do
             current = %Checkpoint{

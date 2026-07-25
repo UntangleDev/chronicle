@@ -75,10 +75,15 @@ defmodule Chronicle.Redaction do
 
   ## Effect on Ecto record versions
 
-  A protected field cannot be reconstructed, so a snapshot containing one is
+  A withheld field cannot be reconstructed, so a snapshot containing one is
   reported as incomplete and `Chronicle.at/2` and `Chronicle.revert/2` fail
   closed rather than inventing a value. `mix chronicle.doctor` lists the
-  protected fields of every audited schema so this is a visible decision.
+  withheld fields of every audited schema so this is a visible decision.
+
+  Ecto schemas may instead declare `erasable: [field: :privacy_key_id]`.
+  Chronicle stores authenticated ciphertext and reconstructs it while the
+  named external key exists. Destroying that key makes later reconstruction
+  fail without invalidating the signed chain.
 
   ## What name matching structurally cannot see
 
@@ -95,8 +100,8 @@ defmodule Chronicle.Redaction do
   precisely because the policy cannot infer what it cannot name.
   """
 
+  alias Chronicle.{Erasable, Sensitive}
   alias Chronicle.Redaction.Policy
-  alias Chronicle.Sensitive
 
   @substrings ~w(password passwd secret token credential apikey privkey passphrase)
   @segments ~w(pwd ssn cvv cvc iban pin salt jwt)
@@ -176,9 +181,10 @@ defmodule Chronicle.Redaction do
   def protected_fields(schema, opts \\ []) when is_atom(schema) do
     if function_exported?(schema, :__schema__, 1) do
       policy = compile(Keyword.put(opts, :schema, schema))
+      erasable = schema |> schema_policy() |> Map.get(:erasable, []) |> Keyword.keys()
 
       Enum.filter(schema.__schema__(:fields), fn field ->
-        match?(%Sensitive{}, protect_field(policy, field, nil))
+        field not in erasable and match?(%Sensitive{}, protect_field(policy, field, nil))
       end)
     else
       []
@@ -196,7 +202,18 @@ defmodule Chronicle.Redaction do
 
       fields when is_list(fields) or is_nil(fields) ->
         policy = compile(Keyword.put(opts, :schema, schema))
-        fn field, value -> protect_field(policy, field, value) end
+        erasable = schema |> schema_policy() |> Map.get(:erasable, [])
+        record = Keyword.get(opts, :record)
+
+        fn field, value ->
+          case Keyword.fetch(erasable, field) do
+            {:ok, key_field} ->
+              %Erasable{value: value, key_id: erasure_key_id!(record, schema, key_field)}
+
+            :error ->
+              protect_field(policy, field, value)
+          end
+        end
 
       other ->
         raise ArgumentError,
@@ -222,13 +239,31 @@ defmodule Chronicle.Redaction do
   defp field_name(field) when is_atom(field), do: Atom.to_string(field)
   defp field_name(field), do: to_string(field)
 
-  defp schema_policy(nil), do: %{redact: [], hash: [], omit: []}
+  defp erasure_key_id!(%{} = record, schema, key_field) do
+    case Map.get(record, key_field) do
+      key_id when is_binary(key_id) and byte_size(key_id) > 0 ->
+        key_id
+
+      value ->
+        raise ArgumentError,
+              "#{inspect(schema)} erasable field requires #{inspect(key_field)} " <>
+                "to contain a non-empty key id, got: #{inspect(value)}"
+    end
+  end
+
+  defp erasure_key_id!(_record, schema, key_field) do
+    raise ArgumentError,
+          "#{inspect(schema)} erasable field requires a record to resolve " <>
+            "#{inspect(key_field)}"
+  end
+
+  defp schema_policy(nil), do: %{redact: [], hash: [], omit: [], erasable: []}
 
   defp schema_policy(schema) do
     if Code.ensure_loaded?(Chronicle.Ecto.Policy) do
-      schema |> Chronicle.Ecto.Policy.get() |> Map.take([:redact, :hash, :omit])
+      schema |> Chronicle.Ecto.Policy.get() |> Map.take([:redact, :hash, :omit, :erasable])
     else
-      %{redact: [], hash: [], omit: []}
+      %{redact: [], hash: [], omit: [], erasable: []}
     end
   end
 end

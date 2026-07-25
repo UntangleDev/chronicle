@@ -8,7 +8,7 @@ defmodule Chronicle.IntegrityTest do
     %{key: key, opts: [ledger: "primary", key_id: "key-1", key: key]}
   end
 
-  test "verifies content, sequence, previous digest, and HMAC", %{key: key, opts: opts} do
+  test "verifies content, sequence, previous digest, and HMAC", %{opts: opts} do
     assert {:ok, first} =
              Integrity.build(:event, Chronicle.ID.generate(), %{amount: 10}, 1, nil, opts)
 
@@ -22,15 +22,15 @@ defmodule Chronicle.IntegrityTest do
                opts
              )
 
-    assert :ok = Integrity.verify(first, %{amount: 10}, nil, 1, key)
+    assert :ok = Integrity.verify_entry(first, %{amount: 10}, nil, 1, opts)
 
     assert :ok =
-             Integrity.verify(
+             Integrity.verify_entry(
                second,
                %{events: [%{type: "payment.captured"}]},
                first.digest,
                2,
-               key
+               opts
              )
   end
 
@@ -62,15 +62,14 @@ defmodule Chronicle.IntegrityTest do
              "65bc1071e6fb83ece5b787abf4d08d1099a4d2046ecee49d06710db0fb5f665e"
   end
 
-  test "detects modified content", %{key: key, opts: opts} do
+  test "detects modified content", %{opts: opts} do
     {:ok, entry} = Integrity.build(:event, Chronicle.ID.generate(), %{amount: 10}, 1, nil, opts)
 
     assert {:error, {:content_digest_mismatch, 1}} =
-             Integrity.verify(entry, %{amount: 11}, nil, 1, key)
+             Integrity.verify_entry(entry, %{amount: 11}, nil, 1, opts)
   end
 
   test "detects deletion and reordering through sequence and link checks", %{
-    key: key,
     opts: opts
   } do
     {:ok, first} = Integrity.build(:event, Chronicle.ID.generate(), %{n: 1}, 1, nil, opts)
@@ -79,18 +78,18 @@ defmodule Chronicle.IntegrityTest do
       Integrity.build(:event, Chronicle.ID.generate(), %{n: 2}, 2, first.digest, opts)
 
     assert {:error, {:unexpected_sequence, 2}} =
-             Integrity.verify(second, %{n: 2}, nil, 1, key)
+             Integrity.verify_entry(second, %{n: 2}, nil, 1, opts)
 
     assert {:error, {:previous_digest_mismatch, 2}} =
-             Integrity.verify(second, %{n: 2}, "wrong", 2, key)
+             Integrity.verify_entry(second, %{n: 2}, "wrong", 2, opts)
   end
 
-  test "detects a forged signature", %{key: key, opts: opts} do
+  test "detects a forged signature", %{opts: opts} do
     {:ok, entry} = Integrity.build(:event, Chronicle.ID.generate(), %{}, 1, nil, opts)
     forged = %{entry | signature: String.duplicate("0", 64)}
 
     assert {:error, {:signature_mismatch, 1}} =
-             Integrity.verify(forged, %{}, nil, 1, key)
+             Integrity.verify_entry(forged, %{}, nil, 1, opts)
   end
 
   test "rejects short keys and resolves rotated verification keys", %{key: key, opts: opts} do
@@ -137,6 +136,40 @@ defmodule Chronicle.IntegrityTest do
 
     assert {:error, {:key_not_valid_at_sequence, "key-1", 3, {1, 2}}} =
              Integrity.verification_key("key-1", 3, opts)
+  end
+
+  test "verification cannot bypass an entry's configured key epoch" do
+    old_key = :crypto.strong_rand_bytes(32)
+    new_key = :crypto.strong_rand_bytes(32)
+
+    opts = [
+      ledger: "primary",
+      keys: %{"old" => old_key, "new" => new_key},
+      key_epochs: %{"old" => [from: 1, through: 1], "new" => [from: 2]}
+    ]
+
+    scheme = Chronicle.Integrity.Registry.current()
+
+    assert {:ok, forged} =
+             scheme.build(:event, "forged", %{}, 1, nil, "primary", "new", new_key)
+
+    assert {:error, {:key_not_valid_at_sequence, "new", 1, {2, nil}}} =
+             Integrity.verify_entry(forged, %{}, nil, 1, opts)
+
+    refute function_exported?(Integrity, :verify, 5)
+  end
+
+  test "stored scheme selectors dispatch through the retained registry", %{opts: opts} do
+    assert {:ok, entry} = Integrity.build(:event, "id", %{}, 1, nil, opts)
+
+    assert {:ok, Chronicle.Integrity.Scheme.AuditBinaryV1HMACSHA256V2} =
+             Chronicle.Integrity.Registry.fetch(entry.algorithm, entry.canonical_version)
+
+    assert {:error, {:unsupported_canonical_version, 999}} =
+             Integrity.verify_entry(%{entry | canonical_version: 999}, %{}, nil, 1, opts)
+
+    assert {:error, {:unsupported_algorithm, "unknown"}} =
+             Integrity.verify_entry(%{entry | algorithm: "unknown"}, %{}, nil, 1, opts)
   end
 
   test "epoch policy fails closed on gaps, overlap, and keys without epochs" do

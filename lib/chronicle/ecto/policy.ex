@@ -10,6 +10,9 @@ if Code.ensure_loaded?(Ecto.Schema) do
       * `redact`, `hash`, and `omit` withhold a value from the audit store.
         A withheld field cannot be reconstructed, so versions containing one
         are reported incomplete.
+      * `erasable` encrypts a field under a key whose identifier comes from
+        another persisted field. Versions remain reconstructable while the key
+        exists and fail explicitly after it is destroyed.
 
     `hash` stores an unsalted SHA-256 fingerprint. It answers correlation
     questions — did this field change, did it revert, does it match another
@@ -29,19 +32,27 @@ if Code.ensure_loaded?(Ecto.Schema) do
             only: [:email, :password_hash, :session_token],
             redact: [:password_hash],
             hash: [:email],
-            omit: [:session_token]
+            omit: [:session_token],
+            erasable: [display_name: :privacy_key_id]
 
           schema "accounts" do
             field :email, :string
+            field :display_name, :string
             field :password_hash, :string
+            field :privacy_key_id, :string
             field :session_token, :string
           end
         end
 
     `only: :all` is the default. `except` removes fields from that set.
+    Each `erasable` entry maps the encrypted field to the field holding its
+    opaque external key identifier. That identifier must be a non-empty string
+    when a non-nil protected value is written.
+
     A field may have only one protection strategy. Options must be literals so
-    invalid policy shapes fail during compilation, and field names are checked
-    against the Ecto schema once the module has compiled.
+    invalid policy shapes fail during compilation, and both protected and key
+    identifier fields are checked against the Ecto schema once the module has
+    compiled.
     """
 
     @type t :: %{
@@ -49,7 +60,8 @@ if Code.ensure_loaded?(Ecto.Schema) do
             except: [atom()],
             redact: [atom()],
             hash: [atom()],
-            omit: [atom()]
+            omit: [atom()],
+            erasable: [{atom(), atom()}]
           }
 
     defmacro __using__(opts) do
@@ -90,7 +102,7 @@ if Code.ensure_loaded?(Ecto.Schema) do
     end
 
     defp defaults do
-      %{only: :all, except: [], redact: [], hash: [], omit: []}
+      %{only: :all, except: [], redact: [], hash: [], omit: [], erasable: []}
     end
 
     defp build_policy!(opts, module) do
@@ -123,7 +135,15 @@ if Code.ensure_loaded?(Ecto.Schema) do
               "#{inspect(module)} audit only must be :all or a list of field atoms"
       end
 
-      protected = policy.redact ++ policy.hash ++ policy.omit
+      unless Keyword.keyword?(policy.erasable) and
+               Enum.all?(policy.erasable, fn {field, key_field} ->
+                 is_atom(field) and is_atom(key_field)
+               end) do
+        raise ArgumentError,
+              "#{inspect(module)} audit erasable must map field atoms to key-id field atoms"
+      end
+
+      protected = policy.redact ++ policy.hash ++ policy.omit ++ Keyword.keys(policy.erasable)
 
       if length(protected) != MapSet.size(MapSet.new(protected)) do
         raise ArgumentError,
@@ -137,7 +157,11 @@ if Code.ensure_loaded?(Ecto.Schema) do
 
         configured =
           List.wrap(if(policy.only == :all, do: [], else: policy.only)) ++
-            policy.except ++ policy.redact ++ policy.hash ++ policy.omit
+            policy.except ++
+            policy.redact ++
+            policy.hash ++
+            policy.omit ++
+            Keyword.keys(policy.erasable) ++ Keyword.values(policy.erasable)
 
         unknown = configured |> MapSet.new() |> MapSet.difference(declared) |> MapSet.to_list()
 
@@ -164,7 +188,9 @@ if Code.ensure_loaded?(Ecto.Schema) do
 
     `only` and `except` narrow which changes are reported; `redact`, `hash`,
     and `omit` withhold a value and therefore make versions containing it
-    non-restorable. See `Chronicle.Ecto.Policy` for the full contract.
+    non-restorable. `erasable` stores authenticated ciphertext that remains
+    restorable only while its external key exists. See
+    `Chronicle.Ecto.Policy` for the full contract.
     """
 
     defmacro __using__(opts) do

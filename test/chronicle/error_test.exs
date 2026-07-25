@@ -37,7 +37,7 @@ defmodule Chronicle.ErrorTest do
             {:no_signing_key_for_sequence, 1},
             {:key_epoch_not_found, "k"},
             {:invalid_key_epoch, []},
-            {:keyring_failure, %RuntimeError{}},
+            {:keyring_failure, RuntimeError},
             {:invalid_keyring_result, :nope},
             {:overlapping_key_epochs, 3, ["a", "b"]},
             {:key_not_valid_at_sequence, "k", 3, {1, 2}},
@@ -47,6 +47,17 @@ defmodule Chronicle.ErrorTest do
       end
 
       assert reason({:verification_key_not_found, "k"}) == :verification_key_missing
+    end
+
+    test "erasure-key failures remain matchable without provider details" do
+      assert reason({:erasure_key_unavailable, "subject-1"}) == :erasure_key_unavailable
+      assert reason(:erasure_keyring_not_configured) == :erasure_key_unavailable
+
+      assert reason({:erasure_keyring_failure, :fetch, RuntimeError}) ==
+               :erasure_key_unavailable
+
+      assert reason({:erasure_key_destruction_failed, "subject-1"}) ==
+               :erasure_key_destruction_failed
     end
   end
 

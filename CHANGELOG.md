@@ -5,6 +5,34 @@ Until 1.0, a minor version may change anything: names, options, struct fields,
 database columns, and the signed content format. No compatibility layers are
 kept during that period.
 
+## Unreleased
+
+## 0.1.1
+
+### Added
+
+- A closed historical-verifier registry keyed by the algorithm and canonical
+  version stored on each ledger entry. The current writer and retained
+  verification schemes are separate, so a future writer can be added without
+  removing the implementation needed to verify older evidence.
+- Authenticated erasable values backed by `Chronicle.ErasureKeyring`.
+  `Chronicle.erasable/2` and per-schema `erasable` policies store AES-256-GCM
+  ciphertext; `Chronicle.Erasure.destroy/1` removes plaintext access while the
+  ledger continues to verify.
+
+### Changed
+
+- Deleted the raw-key low-level verifier and added
+  `Chronicle.Integrity.verify_entry/5`. Verification now resolves the entry's
+  key identifier through its configured sequence epoch internally; no
+  compatibility path accepts raw key material.
+- Canonical version 1 now enforces its existing aggregate byte limit as a
+  running budget and flattens accepted iodata once. Accepted encodings and the
+  published integrity vector are unchanged.
+- Key-resolver and keyring exceptions now expose only the exception module;
+  exception messages, fields, and stacktraces do not cross the secret-manager
+  boundary in ordinary error terms.
+
 ## 0.1.0
 
 First release.

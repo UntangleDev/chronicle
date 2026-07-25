@@ -83,6 +83,33 @@ defmodule Chronicle.Error do
   defp normalize_reason({:snapshot_incomplete, _fields} = cause),
     do: {:snapshot_incomplete, cause, nil}
 
+  defp normalize_reason({:erasure_key_unavailable, _key_id} = cause),
+    do: {:erasure_key_unavailable, cause, nil}
+
+  defp normalize_reason({:erasure_key_destruction_failed, _key_id} = cause),
+    do: {:erasure_key_destruction_failed, cause, nil}
+
+  defp normalize_reason(reason)
+       when reason in [:erasure_keyring_not_configured, :invalid_erasure_keyring_configuration],
+       do: {:erasure_key_unavailable, reason, nil}
+
+  defp normalize_reason({reason, _detail} = cause)
+       when reason in [
+              :erasure_keyring_failure,
+              :invalid_erasure_keyring_result,
+              :erasure_keyring_missing_callback
+            ],
+       do: {:erasure_key_unavailable, cause, nil}
+
+  defp normalize_reason({:erasure_keyring_failure, _operation, _exception_class} = cause),
+    do: {:erasure_key_unavailable, cause, nil}
+
+  defp normalize_reason({:erasure_keyring_missing_callback, _module, _function} = cause),
+    do: {:erasure_key_unavailable, cause, nil}
+
+  defp normalize_reason({:invalid_erasure_key_length, _key_id, _actual, _expected} = cause),
+    do: {:erasure_key_unavailable, cause, nil}
+
   defp normalize_reason({:schema_incompatible, _stored, _current} = cause),
     do: {:schema_incompatible, cause, nil}
 
