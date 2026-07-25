@@ -19,6 +19,12 @@ Each domain mutation and its audit version commit in the same database
 transaction. Arbitrary non-database facts and larger grouped operations use the
 same signed event model.
 
+> #### CAUTION {: .warning}
+>
+> Chronicle is a work in progress and has not reached a stable 1.0 release.
+> The API, configuration, and hash encodings may change without a migration
+> path before then. Do not use it in production until a version 1.0 release.
+
 ## Guarantees and threat model
 
 The Ecto provider stores every standalone event or complete group in an

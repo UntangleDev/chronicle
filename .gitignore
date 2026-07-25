@@ -28,7 +28,6 @@ erl_crash.dump
 /AGENTS.md
 /CLAUDE.md
 /.claude/
-/.design-delegate/
 
 # macOS
 .DS_Store
