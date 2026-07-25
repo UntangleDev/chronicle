@@ -53,6 +53,7 @@ defmodule Chronicle.MixProject do
   defp package do
     [
       licenses: ["MIT"],
+      links: %{},
       files: ~w(lib bench .formatter.exs mix.exs README.md LICENSE CHANGELOG.md)
     ]
   end
