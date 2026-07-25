@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same branch; the full matrix is not worth
+# finishing for a commit that has already been replaced.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (elixir ${{ matrix.elixir }} / otp ${{ matrix.otp }})
+    runs-on: ubuntu-latest
+
+    env:
+      MIX_ENV: test
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The floor declared in mix.exs. It is here because nothing else
+          # checks that the declared minimum actually builds: the OTP 25
+          # requirement of `:crypto.hash_equals/2` was undeclared for a while
+          # and no local run would ever have caught it.
+          - elixir: "1.17"
+            otp: "25"
+          # Current, and the entry that gates coverage.
+          - elixir: "1.20"
+            otp: "28"
+            coverage: true
+
+    services:
+      # The concurrency and PostgreSQL adversarial suites cannot run without
+      # this. `storage_up` creates the database, so no manual setup is needed.
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ matrix.elixir }}
+          otp-version: ${{ matrix.otp }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-test-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-test-${{ matrix.otp }}-${{ matrix.elixir }}-
+
+      - run: mix deps.get
+
+      - run: mix compile --warnings-as-errors
+
+      # CHRONICLE_REQUIRE_POSTGRES turns an unreachable server into a failure.
+      # Without it the suite silently excludes its PostgreSQL-only tests and
+      # reports success, which is the one result this workflow must never give.
+      - name: Test
+        if: ${{ !matrix.coverage }}
+        env:
+          CHRONICLE_TEST_DATABASE_URL: ecto://postgres:postgres@127.0.0.1:5432/chronicle_test
+          CHRONICLE_REQUIRE_POSTGRES: "1"
+        run: mix test
+
+      # Coverage is gated on one entry rather than all of them: the threshold in
+      # mix.exs is a project invariant, not a per-version one, and holding two
+      # Elixir releases to a shared percentage invites a failure that says
+      # nothing about the code.
+      - name: Test with coverage
+        if: ${{ matrix.coverage }}
+        env:
+          CHRONICLE_TEST_DATABASE_URL: ecto://postgres:postgres@127.0.0.1:5432/chronicle_test
+          CHRONICLE_REQUIRE_POSTGRES: "1"
+        run: mix test --cover
+
+  quality:
+    name: format and docs
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.20"
+          otp-version: "28"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-dev-1.20-28-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-dev-1.20-28-
+
+      - run: mix deps.get
+
+      - run: mix format --check-formatted
+
+      # ex_doc is a dev-only dependency, so this job deliberately runs in the
+      # default MIX_ENV. A reference that no longer resolves fails the build for
+      # the same reason a compiler warning does.
+      - run: mix docs --warnings-as-errors
