@@ -138,6 +138,75 @@ defmodule Chronicle.CanonicalLimitsTest do
     end
   end
 
+  describe "decoding retained canonical values" do
+    test "round-trips every supported value type" do
+      values = [
+        nil,
+        false,
+        true,
+        0,
+        -42,
+        "binary",
+        1.25,
+        :chronicle_erasable_v1,
+        [1, "two"],
+        {1, "two"},
+        %{"nested" => [true, nil]}
+      ]
+
+      for value <- values do
+        assert {:ok, ^value} = value |> Canonical.encode() |> Canonical.decode()
+      end
+    end
+
+    test "rejects unknown versions, malformed frames, and trailing bytes" do
+      assert {:error, :invalid_canonical_encoding} = Canonical.decode(<<>>)
+      assert {:error, {:unsupported_canonical_version, 255}} = Canonical.decode(<<255, 0>>)
+
+      assert_raise ArgumentError, ~r/unsupported Chronicle canonical version/, fn ->
+        Canonical.encode("value", 255)
+      end
+
+      assert {:error, :invalid_canonical_encoding} = Chronicle.Canonical.V1.decode(<<2, 0>>)
+      assert {:error, :invalid_canonical_encoding} = Canonical.decode(<<1, 255>>)
+      assert {:error, :trailing_canonical_bytes} = Canonical.decode(<<1, 0, 0>>)
+
+      assert {:error, :truncated_canonical_encoding} =
+               Canonical.decode(<<1, 4, 2::32-big, "x">>)
+
+      assert {:error, :invalid_canonical_encoding} =
+               Canonical.decode(<<1, 3, 2, 1::32-big, 1>>)
+
+      assert {:error, :invalid_canonical_encoding} =
+               Canonical.decode(<<1, 3, 0, 0::32-big>>)
+    end
+
+    test "refuses atom creation and contradictory collection framing" do
+      unknown_atom = "chronicle_unknown_atom_7c105ced"
+
+      assert {:error, :unknown_canonical_atom} =
+               Canonical.decode(<<1, 6, byte_size(unknown_atom)::32-big, unknown_atom::binary>>)
+
+      assert {:error, :invalid_canonical_collection_length} =
+               Canonical.decode(<<1, 7, 0::32-big, 1::32-big, 0>>)
+
+      assert {:error, :invalid_canonical_map_length} =
+               Canonical.decode(<<1, 9, 0::32-big, 1::32-big, 0>>)
+
+      assert {:error, :duplicate_canonical_map_key} =
+               Canonical.decode(<<1, 9, 2::32-big, 4::32-big, 0, 1, 0, 2>>)
+    end
+
+    test "decoding enforces the frozen depth limit" do
+      encoded =
+        Enum.reduce(1..65, <<0>>, fn _, child ->
+          <<7, 1::32-big, byte_size(child)::32-big, child::binary>>
+        end)
+
+      assert {:error, {:canonical_depth_exceeded, 65}} = Canonical.decode(<<1, encoded::binary>>)
+    end
+  end
+
   describe "integrity uses it end to end" do
     test "an entry verifies against its own payload" do
       key = :crypto.strong_rand_bytes(32)

@@ -7,6 +7,14 @@ kept during that period.
 
 ## Unreleased
 
+## 0.1.2
+
+### Changed
+
+- Expanded the retained canonical decoder and erasable-value failure-path
+  suites so malformed historical values and keyring contract violations remain
+  covered by the release gate.
+
 ## 0.1.1
 
 ### Added

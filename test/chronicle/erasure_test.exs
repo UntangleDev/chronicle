@@ -37,6 +37,32 @@ defmodule Chronicle.ErasureTest do
     def destroy(_key_id, _opts), do: raise("provider response contained SECRET-PROBE")
   end
 
+  defmodule MissingCallbacks do
+    @moduledoc false
+  end
+
+  defmodule InvalidResults do
+    @moduledoc false
+    @behaviour Chronicle.ErasureKeyring
+
+    @impl true
+    def fetch(_key_id, _opts), do: :invalid
+
+    @impl true
+    def destroy(_key_id, _opts), do: :invalid
+  end
+
+  defmodule InvalidKey do
+    @moduledoc false
+    @behaviour Chronicle.ErasureKeyring
+
+    @impl true
+    def fetch(_key_id, _opts), do: {:ok, "short"}
+
+    @impl true
+    def destroy(_key_id, _opts), do: {:error, :provider_refused}
+  end
+
   defmodule Account do
     use Ecto.Schema
     use Chronicle.Schema, erasable: [email: :privacy_key_id]
@@ -152,10 +178,12 @@ defmodule Chronicle.ErasureTest do
   test "resolver exceptions expose only their class" do
     Application.put_env(:chronicle, :erasure, keyring: RaisingKeys)
 
-    result = Chronicle.Erasure.encrypt("private", "subject-1")
+    fetch_result = Chronicle.Erasure.encrypt("private", "subject-1")
+    destroy_result = Chronicle.Erasure.destroy("subject-1")
 
-    assert result == {:error, {:erasure_keyring_failure, :fetch, RuntimeError}}
-    refute inspect(result) =~ "SECRET-PROBE"
+    assert fetch_result == {:error, {:erasure_keyring_failure, :fetch, RuntimeError}}
+    assert destroy_result == {:error, {:erasure_keyring_failure, :destroy, RuntimeError}}
+    refute inspect({fetch_result, destroy_result}) =~ "SECRET-PROBE"
   end
 
   test "a failed non-bang write returns a structured error and stores no plaintext" do
@@ -165,6 +193,87 @@ defmodule Chronicle.ErasureTest do
              Chronicle.record("personal.changed", %{
                email: Chronicle.erasable("person@example.test", "subject-1")
              })
+  end
+
+  test "invalid envelopes fail with a precise field error" do
+    assert {:ok, envelope} = Chronicle.Erasure.encrypt("private", "subject-1")
+
+    assert {:error, :invalid_erasable_envelope} = Chronicle.Erasure.decrypt(%{})
+
+    assert {:error, :invalid_erasable_envelope} =
+             envelope
+             |> Map.put("extra", "value")
+             |> Chronicle.Erasure.decrypt()
+
+    assert {:error, {:invalid_erasable_envelope_encoding, :nonce}} =
+             envelope
+             |> Map.put("nonce", "!")
+             |> Chronicle.Erasure.decrypt()
+
+    assert {:error, {:invalid_erasable_envelope_encoding, :ciphertext}} =
+             envelope
+             |> Map.put("ciphertext", nil)
+             |> Chronicle.Erasure.decrypt()
+
+    assert {:error, {:invalid_erasable_envelope_size, :nonce}} =
+             envelope
+             |> Map.put("nonce", Base.url_encode64("short", padding: false))
+             |> Chronicle.Erasure.decrypt()
+
+    assert {:error, {:invalid_erasable_envelope_size, :tag}} =
+             envelope
+             |> Map.put("tag", Base.url_encode64("short", padding: false))
+             |> Chronicle.Erasure.decrypt()
+
+    refute Chronicle.Erasure.envelope?(%{})
+  end
+
+  test "keyring configuration and provider contracts fail closed" do
+    Application.delete_env(:chronicle, :erasure)
+    refute Chronicle.ErasureKeyring.configured?()
+
+    assert {:error, :erasure_keyring_not_configured} =
+             Chronicle.ErasureKeyring.fetch("subject-1")
+
+    Application.put_env(:chronicle, :erasure, keyring: "not-a-keyring")
+
+    assert {:error, :invalid_erasure_keyring_configuration} =
+             Chronicle.ErasureKeyring.fetch("subject-1")
+
+    Application.put_env(:chronicle, :erasure, keyring: MissingCallbacks)
+
+    assert {:error, {:erasure_keyring_missing_callback, MissingCallbacks, :fetch}} =
+             Chronicle.ErasureKeyring.fetch("subject-1")
+
+    Application.put_env(:chronicle, :erasure, keyring: InvalidResults)
+
+    assert {:error, {:invalid_erasure_keyring_result, :fetch}} =
+             Chronicle.ErasureKeyring.fetch("subject-1")
+
+    assert {:error, {:invalid_erasure_keyring_result, :destroy}} =
+             Chronicle.ErasureKeyring.destroy("subject-1")
+
+    Application.put_env(:chronicle, :erasure, keyring: InvalidKey)
+
+    assert {:error, {:invalid_erasure_key_length, "subject-1", 5, 32}} =
+             Chronicle.ErasureKeyring.fetch("subject-1")
+
+    assert {:error, {:erasure_key_destruction_failed, "subject-1"}} =
+             Chronicle.ErasureKeyring.destroy("subject-1")
+
+    assert {:error, :invalid_erasure_key_id} = Chronicle.ErasureKeyring.fetch("")
+    assert {:error, :invalid_erasure_key_id} = Chronicle.ErasureKeyring.destroy(nil)
+  end
+
+  test "the bang encryption error contains the safe matchable reason" do
+    Application.delete_env(:chronicle, :erasure)
+
+    error =
+      assert_raise Chronicle.Erasure.Error, ~r/erasure_keyring_not_configured/, fn ->
+        Chronicle.Erasure.encrypt!("private", "subject-1")
+      end
+
+    assert error.reason == :erasure_keyring_not_configured
   end
 
   defp random_key, do: :crypto.strong_rand_bytes(32)
