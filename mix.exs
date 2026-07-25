@@ -53,7 +53,6 @@ defmodule Chronicle.MixProject do
   defp package do
     [
       licenses: ["MIT"],
-      links: %{"Audit.NET reference" => "https://github.com/thepirat000/audit.net"},
       files: ~w(lib bench .formatter.exs mix.exs README.md LICENSE CHANGELOG.md)
     ]
   end
